@@ -1,0 +1,2 @@
+	HS578T	MCF7	MDA-MB-231	T47D	ZR-75B
+type 	TNBC	luminal 	TNBC	luminal 	luminal 

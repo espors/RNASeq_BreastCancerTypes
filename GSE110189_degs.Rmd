@@ -1,0 +1,375 @@
+---
+title: "GSE110810_degs"
+author: "Emma Spors"
+date: "12/3/2021"
+output: html_document
+---
+
+# Preliminaries 
+```{r}
+library(readr)
+library(tidyverse)
+library(DESeq2)
+library(limma)
+library(edgeR)
+```
+
+```{r}
+counts <- read.csv("GSE110810_counts.csv", row.names=1)
+```
+
+# Exploration of raw data 
+
+```{r}
+dim(counts)
+```
+```{r}
+summary(counts)
+
+counts[is.na(counts)] <- 0 
+
+summary(counts)
+```
+
+```{r}
+barplot(colSums(counts) / 1e6, col="grey", las=3, main="Total read counts (millions)", ylab="Total reads in millions")
+```
+```{r}
+hist(counts[,1], br = 200)
+```
+## Prepare experimental design 
+
+```{r}
+type = c("luminal", "luminal", "luminal", "basal", "basal", "basal")
+
+design <- as.data.frame(type)  
+
+rownames(design) <- colnames(counts)
+
+design$type <- factor(design$type)
+
+design$type <- relevel(design$type, ref = "luminal")
+
+design
+```
+
+```{r}
+dim(counts)
+
+counts <- counts[ which( apply( cpm(DGEList(counts = counts)),1, function(y) sum(y>=.5)) >=  3), ]
+
+dim(counts)
+```
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = counts, 
+                              colData = design, 
+                              design = ~ type)
+
+dds <- DESeq(dds)
+
+summary(dds)
+```
+
+```{r}
+transformed <- vst(dds, blind = T)
+```
+
+```{r}
+hist(assay(dds), main = "Histogram of Original Data", breaks = 20)
+hist(assay(transformed), main = "Histogram of Data with VTS Transformation")
+```
+
+```{r}
+library(vsn)
+meanSdPlot(assay(transformed)) 
+
+```
+
+
+
+```{r}
+select <- order(apply(assay(transformed), 1, sd), 
+                decreasing = T)[1:150]
+
+df <- as.data.frame(colData(dds))[, c("type")]
+df
+
+pheatmap::pheatmap(
+  assay(transformed)[select, ], 
+  cluster_rows = FALSE, 
+  show_rownames = FALSE, 
+  cluster_cols = FALSE,
+  #annotation_col = df, 
+  main = "Heatmap of transformed Values"
+)
+
+pheatmap::pheatmap(
+  assay(transformed)[select, ] - rowMeans(assay(transformed)[select, ]), 
+  cluster_rows = FALSE, 
+  show_rownames = FALSE, 
+  cluster_cols = FALSE, 
+  #annotation_col = df, 
+  main = "Heatmap of Transformed Values Minus Row Mean"
+)
+```
+
+### Hierarchical clustering 
+
+```{r}
+library(RColorBrewer)
+
+sample_dist <- dist(t(assay(transformed)))
+
+sample_dist_matrix <- as.matrix(sample_dist)
+
+rownames(sample_dist_matrix) <- paste(transformed$type)
+colnames(sample_dist_matrix) <- NULL
+colors <- colorRampPalette(rev(brewer.pal(20, "Blues")))(225)
+pheatmap::pheatmap(sample_dist_matrix, clustering_distance_rows = sample_dist,
+                   clustering_distance_cols = sample_dist, 
+                   col = colors)
+```
+
+### Principle component analysis 
+
+```{r}
+pcaData <- plotPCA(transformed, intgroup = c("type"), returnData = T)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color = type, shape = type)) + 
+  geom_point(size = 3) + 
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) + 
+  coord_fixed() + 
+  scale_color_manual(values = c("lightblue", "black")) + 
+  labs(title = "PCA Plot of First and Second Principle Component", color = "BC Type", shape = "BC Type") +
+  theme_light()
+```
+```{r}
+library(gplots)
+
+hclust2 <- function(x, method = "average", ...){
+  hclust(x, method = method, ...)
+}
+
+dist2 <- function(x, ...)   # distance function = 1-PCC (Pearson's correlation coefficient)
+  as.dist(1-cor(t(x), method="pearson"))
+
+n = 30 
+x = assay(transformed)
+
+if(n>dim(x)[1]) n = dim(x)[1]
+
+x = x[order(apply(x,1,sd), decreasing = TRUE), ]
+
+x = x[1:n,]
+
+colnames(x) <- c("MCF7", "T47D", "BT.474", "BT.549", "HBL.100", "SUM.159")
+
+x=as.matrix(x[1:n,])-apply(x[1:n,],1,mean)
+cutoff = median(unlist(x)) + 4*sd (unlist(x)) 
+x[x>cutoff] <- cutoff
+cutoff = median(unlist(x)) - 4*sd (unlist(x)) 
+x[x< cutoff] <- cutoff
+    
+groups = c("Luminal", "Luminal", "Luminal", "Basal", "Basal", "Basal")
+groups.colors = c("darkgrey","lightblue")
+
+
+    lmat = rbind(c(5,4),c(0,1),c(3,2))
+    lwid = c(1.5,4)
+    lhei = c(1,.2,4)
+
+ # heatmap.2(x, distfun = dist2,hclustfun=hclust2,
+ #     col=redblue(75), density.info="none", trace="none", scale="none", keysize=.5
+ #    ,key=T, symkey=F
+ #    #,labRow=labRow
+ #    ,ColSideColors=groups.colors[ as.factor(groups)]
+ #    #,margins=c(10,10)
+ #    ,cexRow= .5
+ #    ,srtCol=45
+ #    ,cexCol= 1  # size of font for sample names
+ #    ,lmat = lmat, lwid = lwid, lhei = lhei
+ #    )
+```
+
+
+# Differently expressed genes 
+
+```{r}
+res <- results(dds, 
+               contrast = c("type", "basal", "luminal"), 
+               alpha = 0.1, 
+               lfcThreshold = 0,
+               altHypothesis = "greaterAbs"
+       )
+summary(res)
+```
+
+```{r}
+res <- res[order(abs(res$log2FoldChange), decreasing = TRUE),]
+head(res)
+```
+
+```{r}
+DESeq2::plotMA(res, ylim = c(-5,5))
+```
+
+```{r}
+library(gapminder)
+```
+
+
+```{r}
+res1 = as.data.frame(res)
+
+res1 = mutate(res1, sig = ifelse(res1$padj < 0.05, TRUE, FALSE))
+
+res1[which(abs(res1$log2FoldChange) < 2), 'sig'] <- FALSE
+
+res1[which(rownames(res1) == "ENSG00000186153"), 'sig'] <- "Wwox"
+
+highlight_df <- res1 %>% 
+  filter((rownames(res1)) == "ENSG00000186153")
+```
+
+
+```{r}
+p <- ggplot(res1, aes(log2FoldChange, -log10(padj))) + 
+  geom_point(aes(col = sig)) + 
+  scale_color_manual(values=c("black", "grey", "blue")) + 
+  theme_light() + geom_point(data = highlight_df, 
+                             aes(log2FoldChange, -log10(padj)), 
+                             color = "blue", 
+                             size = 3) + 
+  labs(col = "Significant")
+
+p
+```
+
+```{r}
+topGene <- rownames(res)[1]
+plotCounts(dds, gene = topGene, intgroup = ("type")) #, ylim = c(0, 10500))
+
+plotCounts(dds, gene = "ENSG00000186153", intgroup = ("type"))
+
+plotCounts(dds, gene = "ENSG00000212864", intgroup = ("type"))
+
+```
+
+
+## Annontating genes using Bioconductor 
+
+```{r}
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+columns(org.Hs.eg.db)
+```
+
+
+```{r}
+row.names(res1) <- gsub(" ", "", row.names(res))
+res1$symbol <- gsub(" ","",row.names(res1)) 
+res1$entrez <- mapIds(org.Hs.eg.db,
+                     keys= row.names(res1),
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+res1$genename <- mapIds(org.Hs.eg.db,
+                     keys= row.names(res1),
+                     column="GENENAME",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+```
+
+```{r}
+write.csv(res1, file = "results.csv")
+```
+
+```{r}
+res1 = mutate(res1, sig = ifelse(res1$padj < 0.05, TRUE, FALSE))
+resSig = filter(res1, sig)
+head(resSig)
+```
+
+
+## Using GAGE for pathway analysis 
+
+```{r}
+library(gage)
+library(pathview)
+library(gageData)
+
+data(go.sets.hs)
+data(go.subs.hs)
+```
+
+
+
+```{r}
+foldchanges = res1$log2FoldChange
+names(foldchanges) = res1$entrez
+head(foldchanges)
+```
+```{r}
+gobpsets = go.sets.hs[go.subs.hs$BP]
+gobpres = gage(foldchanges, gsets=gobpsets, same.dir=TRUE)
+lapply(gobpres, head)
+```
+
+```{r}
+data("kegg.sets.hs")
+data("sigmet.idx.hs")
+kegg.sets.hs = kegg.sets.hs[sigmet.idx.hs]
+```
+
+
+```{r}
+keggres = gage(foldchanges, gsets=kegg.sets.hs, same.dir=TRUE)
+
+# Look at both up (greater), down (less), and statatistics.
+lapply(keggres, head)
+
+sig_kegg <- as.data.frame(keggres$greater) %>%
+  filter(p.val < 0.1)
+```
+```{r}
+keggrespathways = data.frame(id=rownames(keggres$greater), keggres$greater) %>% 
+  tbl_df() %>% 
+  filter(row_number()<=6) %>% 
+  .$id %>% 
+  as.character()
+keggrespathways
+```
+
+```{r}
+keggresids = substr(keggrespathways, start=1, stop=8)
+keggresids
+```
+```{r}
+plot_pathway = function(pid) pathview(gene.data=foldchanges, pathway.id=pid, species="hsa", new.signature=FALSE)
+
+# plot multiple pathways (plots saved to disk and returns a throwaway list object)
+tmp = sapply(keggresids, function(pid) pathview(gene.data=foldchanges, pathway.id=pid, species="hsa"))
+```
+
+```{r}
+keggrespathways = data.frame(id=rownames(keggres$less), keggres$less) %>% 
+  tbl_df() %>% 
+  filter(row_number()<=3) %>% 
+  .$id %>% 
+  as.character()
+keggrespathways
+```
+
+
+```{r}
+keggresids = substr(keggrespathways, start=1, stop=8)
+keggresids
+```
+
+```{r}
+plot_pathway = function(pid) pathview(gene.data=foldchanges, pathway.id=pid, species="hsa", new.signature=FALSE)
+
+# plot multiple pathways (plots saved to disk and returns a throwaway list object)
+tmp = sapply(keggresids, function(pid) pathview(gene.data=foldchanges, pathway.id=pid, species="hsa"))
+```
